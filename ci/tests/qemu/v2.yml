@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+#
+# The second Target of the QEMU update test: the same image with a marker in
+# /etc/os-release, so the updated rootfs is a new OSTree commit the test can
+# recognize after the reboot.
+header:
+  version: 14
+
+local_conf_header:
+  qemu-test-v2: |
+    QEMU_TEST_TARGET = "v2"
+    OS_RELEASE_FIELDS:append = " QEMU_TEST_TARGET"

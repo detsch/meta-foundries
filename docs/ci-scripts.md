@@ -81,3 +81,27 @@ vale --config=docs/.vale.ini docs/ci-scripts.md  # a single file
 `MinAlertLevel` is `suggestion`, so expect suggestions, warnings, and errors.
 CI reports any of them on the lines your pull request adds, so clear them
 before pushing.
+
+## QEMU Update Test
+
+`ci/scripts/qemu-test.sh <machine>` boots the image of a finished build in
+QEMU and updates it through a local update-server. CI runs it after the
+`build` job for the targets marked `qemu-test` in
+`.github/workflows/kas-build.yml`.
+
+The test registers the device with `fio-device-register`, publishes the booted
+commit as Target `v1`, then builds and publishes `v2` with
+`ci/tests/qemu/v2.yml`. It checks that `aktualizr-lite` installs `v2`, reboots
+into it, and finalizes the update.
+
+Run it after a build, with the same `KAS_WORK_DIR`:
+
+```sh
+kas-container build ci/qemux86-64.yml
+ci/scripts/qemu-test.sh qemux86-64
+```
+
+The guest uses the Kernel-based Virtual Machine (KVM) when `/dev/kvm` is
+writable. The serial console, update-server, and `aktualizr-lite` logs land in
+`$KAS_WORK_DIR/qemu-test/logs`, which CI uploads as the
+`qemu-test-<machine>` artifact.
