@@ -75,6 +75,10 @@ jobs:
           - qemuarm64-secureboot
           - qemux86-64
           - uno-q
+        # Targets booted in QEMU and updated by ci/scripts/qemu-test.sh.
+        include:
+          - target: qemux86-64
+            qemu-test: true
     name: build ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -152,3 +156,15 @@ jobs:
           object_tag: ${{ env.OBJECT_TAG }}
           build_type: ${{ env.BUILD_TYPE }}
           build_branch: "branch=${{ github.base_ref || github.ref_name }}"
+
+      - name: QEMU update test ${{ matrix.target }}
+        if: matrix.qemu-test
+        run: ci/scripts/qemu-test.sh ${{ matrix.target }}
+
+      - name: Upload QEMU test logs
+        if: always() && matrix.qemu-test
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qemu-test-${{ matrix.target }}
+          path: ${{ env.KAS_WORK_DIR }}/qemu-test/logs
+          if-no-files-found: ignore
