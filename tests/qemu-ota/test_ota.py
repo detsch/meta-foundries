@@ -14,6 +14,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from conftest import APP, HARDWARE_ID, TAG, wait_for
 
 
@@ -153,6 +155,33 @@ def test_rollback_on_app_failure(fiocli, registered_device, device, releases,
              timeout=600)
     assert _applied_version(device) == 2
     assert device.boot_id() == boot_id, "rollback rebooted the device"
+    assert 'BUILD_ID="qemu-ota-os-2"' in device.run(
+        "cat /usr/lib/os-release").stdout
+    wait_for(f"{APP} running", lambda: _app_running(device), timeout=300)
+
+    # A failed Target is skipped from then on: let the client poll a few
+    # times, then check it was downloaded once.
+    time.sleep(60)
+    _assert_single_download(fiocli, registered_device)
+
+
+def test_rollback_on_boot_failure(fiocli, registered_device, device, releases,
+                                  app_content, tmp_session):
+    """An OS that never completes a boot: the boot loader runs out of tries
+    and boots the previous deployment, and aktualizr-lite rolls back to
+    version 2."""
+    broken = releases / "broken" / "ostree_repo"
+    if not broken.exists():
+        pytest.skip("this machine boots without boot counting")
+    content = _stage(tmp_session, 4, broken, app_content)
+    boot_id = device.boot_id()
+    _deliver(fiocli, registered_device, content, 4)
+
+    wait_for("version 4 to fail", _install_failed(fiocli, registered_device, 4))
+    assert device.boot_id() != boot_id, "the broken OS was never booted"
+    assert "Attempted to kill init" in device.console.read_text(
+        errors="replace"), "the broken OS did not fail its boot"
+    assert _applied_version(device) == 2
     assert 'BUILD_ID="qemu-ota-os-2"' in device.run(
         "cat /usr/lib/os-release").stdout
     wait_for(f"{APP} running", lambda: _app_running(device), timeout=300)

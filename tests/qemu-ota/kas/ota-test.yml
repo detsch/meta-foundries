@@ -5,3 +5,7 @@ local_conf_header:
   ota-test: |
     LMP_FACTORY_TAG = "qemu-ota"
     OS_RELEASE_FIELDS:append = " BUILD_ID"
+    # OSTree reuses the boot entries, and so skips boot counting, when a new
+    # deployment matches the one it replaces in kernel, kernel arguments and
+    # commit version; a version per build keeps each update counted.
+    OSTREE_COMMIT_VERSION = "${BUILD_ID}"

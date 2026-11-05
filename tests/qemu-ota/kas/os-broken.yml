@@ -1,0 +1,12 @@
+header:
+  version: 14
+
+repos:
+  meta-foundries:
+    layers:
+      tests/qemu-ota/layer:
+
+local_conf_header:
+  ota-test-os-version: |
+    BUILD_ID = "qemu-ota-os-broken"
+    INHERIT += "qemu-ota-broken-os"
