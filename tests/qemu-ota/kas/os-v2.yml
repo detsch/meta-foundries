@@ -1,0 +1,6 @@
+header:
+  version: 14
+
+local_conf_header:
+  ota-test-os-version: |
+    BUILD_ID = "qemu-ota-os-2"
