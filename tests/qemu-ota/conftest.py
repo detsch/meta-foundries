@@ -5,6 +5,7 @@
 
 import os
 import shutil
+import ssl
 import subprocess
 import tempfile
 import time
@@ -219,6 +220,126 @@ def app_content() -> Path:
         subprocess.run([_tool("composectl"), "pull", "--arch", APP_ARCH,
                         f"-i{apps}", f"-s{apps}", APP_URI], check=True)
     return apps
+
+
+# Its container bind-mounts a missing host path: `docker compose config`
+# passes, so the download succeeds, and container creation fails at install.
+BROKEN_APP_COMPOSE = """\
+services:
+  broken:
+    image: {image}
+    volumes:
+      - type: bind
+        source: /nonexistent/qemu-ota-broken-app
+        target: /data
+        bind:
+          create_host_path: false
+"""
+BUSYBOX = ("docker.io/library/busybox@sha256:"
+           "a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec")
+
+def _docker(*args, **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run([_tool("docker"), *args], check=True,
+                          capture_output=True, text=True, **kwargs)
+
+
+class AppRegistry:
+    """A temporary registry the test Apps are published to, started on first
+    use. composectl talks plain HTTP to any registry that resolves to
+    loopback, yet its pull insists on HTTPS, so the registry serves TLS on
+    the Docker bridge address."""
+
+    def __init__(self, work: Path):
+        self.work = work
+        self.name = f"qemu-ota-registry-{os.getpid()}"
+        self.host = None
+        self.env = None
+
+    def _start(self):
+        if self.host:
+            return
+        certs = self.work / "certs"
+        certs.mkdir(parents=True)
+        gateway = _docker("network", "inspect", "bridge", "--format",
+                          "{{(index .IPAM.Config 0).Gateway}}").stdout.strip()
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "ec",
+             "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days",
+             "1", "-subj", f"/CN={gateway}",
+             "-addext", f"subjectAltName=IP:{gateway}",
+             "-keyout", str(certs / "reg.key"), "-out", str(certs / "reg.crt")],
+            check=True, capture_output=True)
+        system_cas = Path(ssl.get_default_verify_paths().cafile
+                          or "/etc/ssl/certs/ca-certificates.crt").read_text()
+        bundle = certs / "bundle.pem"
+        bundle.write_text(system_cas + (certs / "reg.crt").read_text())
+
+        _docker("run", "-d", "--name", self.name, "-p", f"{gateway}:5000:5000",
+                "-v", f"{certs}:/certs:ro",
+                "-e", "REGISTRY_HTTP_TLS_CERTIFICATE=/certs/reg.crt",
+                "-e", "REGISTRY_HTTP_TLS_KEY=/certs/reg.key", "registry:2")
+
+        def up():
+            try:
+                return requests.get(f"https://{gateway}:5000/v2/", timeout=2,
+                                    verify=str(certs / "reg.crt")).ok
+            except requests.exceptions.ConnectionError:
+                return False
+        wait_for("local registry", up, timeout=60, interval=1)
+        self.host = f"{gateway}:5000"
+        self.env = {**os.environ, "SSL_CERT_FILE": str(bundle)}
+
+    def publish(self, name: str, compose: str) -> str:
+        """Publishes a Compose App; returns its digest URI."""
+        self._start()
+        app_dir = self.work / f"app-{name}-{len(list(self.work.iterdir()))}"
+        app_dir.mkdir()
+        (app_dir / "docker-compose.yml").write_text(compose)
+        digest_file = app_dir / "app.digest"
+        subprocess.run([_tool("composectl"), "publish", "-d", str(digest_file),
+                        f"{self.host}/qemu-ota/{name}:1", "amd64,arm64"],
+                       check=True, cwd=app_dir, env=self.env)
+        return f"{self.host}/qemu-ota/{name}@{digest_file.read_text().strip()}"
+
+    def pull(self, uri: str, apps: Path):
+        """Adds an App to an upload layout for the device's architecture."""
+        subprocess.run([_tool("composectl"), "pull", "--arch", APP_ARCH,
+                        f"-i{apps}", f"-s{apps}", uri],
+                       check=True, env=self.env or os.environ)
+
+    def close(self):
+        if self.host:
+            subprocess.run([_tool("docker"), "rm", "-f", self.name],
+                           capture_output=True)
+
+
+@pytest.fixture(scope="session")
+def app_registry(tmp_session):
+    registry = AppRegistry(tmp_session / "registry")
+    yield registry
+    registry.close()
+
+
+def _cached_apps(apps: Path, build) -> Path:
+    """Builds an upload layout once per architecture, under .cache."""
+    if apps.exists() and any(apps.iterdir()):
+        return apps
+    apps.mkdir(parents=True, exist_ok=True)
+    try:
+        build(apps)
+    except BaseException:
+        shutil.rmtree(apps, ignore_errors=True)
+        raise
+    return apps
+
+
+@pytest.fixture(scope="session")
+def broken_app_content(app_registry) -> Path:
+    """A Compose App that downloads but cannot start."""
+    def build(apps):
+        app_registry.pull(app_registry.publish(
+            "broken-app", BROKEN_APP_COMPOSE.format(image=BUSYBOX)), apps)
+    return _cached_apps(CACHE / f"broken-app-{APP_ARCH}", build)
 
 
 @pytest.fixture(scope="session")

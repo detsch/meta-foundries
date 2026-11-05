@@ -10,6 +10,7 @@ one left.
 import json
 import re
 import subprocess
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -111,3 +112,52 @@ def test_os_update_v2(fiocli, registered_device, device, releases,
     _assert_single_download(fiocli, registered_device)
     journal = device.run("journalctl -b -u aktualizr-lite --no-pager").stdout
     assert "Finalizing pending installation" in journal, journal
+
+
+def _install_failed(fiocli, uuid: str, version: int):
+    def done():
+        for corr_id in fiocli("devices", "updates", uuid).splitlines()[1:]:
+            events = fiocli("devices", "updates", uuid, corr_id.strip())
+            if re.search(rf"EcuInstallationCompleted\([^)]*-{version}\) "
+                         r"-> Failed", events):
+                return True
+        return False
+    return done
+
+
+def _only_booted_pending(device) -> bool:
+    status = device.run("ostree admin status").stdout
+    deployments = re.findall(r"^([* ]) nodistro (\w+)\.\d+(.*)$", status, re.M)
+    booted = next(csum for mark, csum, _ in deployments if mark == "*")
+    return all(csum == booted for _, csum, note in deployments
+               if "pending" in note)
+
+
+def test_rollback_on_app_failure(fiocli, registered_device, device, releases,
+                                 broken_app_content, tmp_session):
+    """OS version 1 with an App that cannot start: the install fails before
+    the reboot, and aktualizr-lite rolls back to version 2."""
+    content = _stage(tmp_session, 3, releases / "1" / "ostree_repo",
+                     broken_app_content)
+    boot_id = device.boot_id()
+    _deliver(fiocli, registered_device, content, 3)
+
+    wait_for("version 3 to fail", _install_failed(fiocli, registered_device, 3))
+    wait_for("rollback to version 2",
+             lambda: "Rolling back to the previous target" in device.run(
+                 "journalctl -b -u aktualizr-lite --no-pager").stdout,
+             timeout=600)
+    # The rollback undeploys the failed OS by deploying the booted commit
+    # again, so a pending deployment may remain, with the booted commit.
+    wait_for("failed OS to be undeployed", lambda: _only_booted_pending(device),
+             timeout=600)
+    assert _applied_version(device) == 2
+    assert device.boot_id() == boot_id, "rollback rebooted the device"
+    assert 'BUILD_ID="qemu-ota-os-2"' in device.run(
+        "cat /usr/lib/os-release").stdout
+    wait_for(f"{APP} running", lambda: _app_running(device), timeout=300)
+
+    # A failed Target is skipped from then on: let the client poll a few
+    # times, then check it was downloaded once.
+    time.sleep(60)
+    _assert_single_download(fiocli, registered_device)
