@@ -73,6 +73,14 @@ def _second_app_version(device) -> str:
     return re.search(r"^APP_VERSION=(\S+)$", env, re.M).group(1)
 
 
+def _assert_no_tls_errors(device):
+    """The client verifies every remote it pulls from, the gateway's own
+    download URL included."""
+    journal = device.run("journalctl -b -u aktualizr-lite --no-pager").stdout
+    for error in ("SSL peer certificate", "unknown authority"):
+        assert error not in journal, f"TLS error in the client log:\n{journal}"
+
+
 def _assert_server_success(fiocli, uuid: str):
     corr_id = fiocli("devices", "updates", uuid).splitlines()[1].strip()
     events = fiocli("devices", "updates", uuid, corr_id)
@@ -174,6 +182,7 @@ def test_rollback_on_app_failure(fiocli, registered_device, device, releases,
     assert 'BUILD_ID="qemu-ota-os-2"' in device.run(
         "cat /usr/lib/os-release").stdout
     wait_for(f"{APP} running", lambda: _app_running(device), timeout=300)
+    _assert_no_tls_errors(device)
 
     # A failed Target is skipped from then on: let the client poll a few
     # times, then check it was downloaded once.
