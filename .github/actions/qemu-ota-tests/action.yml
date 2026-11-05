@@ -1,0 +1,117 @@
+name: qemu OTA tests
+description: >
+  Builds the OS versions of a qemu CI image with the tests/qemu-ota overlays and
+  updates a qemu device through them against a local update-server. Expects
+  KAS_CONTAINER, KAS_WORK_DIR, DL_DIR and SSTATE_DIR in the environment, so a
+  job that has just built the machine reuses its build tree.
+
+inputs:
+  machine:
+    description: The qemu machine, qemux86-64 or qemuarm64-secureboot.
+    required: true
+  update-server-ref:
+    description: The update-server commit the device is tested against.
+    default: 0af7868c4356234e953bec004e3078cc12ca4a5a
+  composectl-version:
+    default: 96.2.1
+  composectl-sha256:
+    default: 9a480dfc8fdff76744cfc8c9a4d6dffffc52708fe4f48830763bc33dd80c215e
+
+runs:
+  using: composite
+  steps:
+    - name: Install the host tools
+      shell: bash
+      env:
+        TARGET: ${{ inputs.machine }}
+      run: |
+        case "$TARGET" in
+        qemux86-64) qemu="qemu-system-x86_64"; qemu_pkg="qemu-system-x86" ;;
+        *) qemu="qemu-system-aarch64"; qemu_pkg="qemu-system-arm" ;;
+        esac
+        for tool in docker openssl python3; do
+          if ! command -v "$tool" >/dev/null; then
+            echo "::error::The runner lacks $tool."
+            exit 1
+          fi
+        done
+        packages=()
+        command -v qemu-img >/dev/null || packages+=(qemu-utils)
+        command -v "$qemu" >/dev/null || packages+=("$qemu_pkg")
+        [ -e /usr/share/qemu/efi-virtio.rom ] || packages+=(ipxe-qemu)
+        command -v sshpass >/dev/null || packages+=(sshpass)
+        python3 -c "import ensurepip" 2>/dev/null || packages+=(python3-venv)
+        if [ ${#packages[@]} -gt 0 ]; then
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::The runner lacks ${packages[*]} and has no passwordless sudo to install them."
+            exit 1
+          fi
+          sudo -n apt-get update -q
+          sudo -n DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y -q --no-install-recommends "${packages[@]}"
+        fi
+        # The runner is ephemeral, so opening /dev/kvm to its user is harmless.
+        if [ -e /dev/kvm ] && [ ! -w /dev/kvm ] && sudo -n true 2>/dev/null; then
+          sudo -n chmod o+rw /dev/kvm
+        fi
+        [ -w /dev/kvm ] || echo "::notice::No usable /dev/kvm; qemux86-64 runs emulated."
+
+    - name: Build the OS versions
+      shell: bash
+      env:
+        OTA_TEST_MACHINE: ${{ inputs.machine }}
+        OTA_TEST_KAS_EXTRA: ci/include/ci.yml
+      run: tests/qemu-ota/build.sh
+
+    # After the build, so the checkout is not inside the tree kas reads.
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        repository: foundriesio/update-server
+        ref: ${{ inputs.update-server-ref }}
+        path: update-server
+        # The web UI assets the binaries embed are in Git LFS.
+        lfs: true
+        persist-credentials: false
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: update-server/go.mod
+        cache: false
+
+    - name: Provision fioserver, fiocli and composectl
+      shell: bash
+      env:
+        COMPOSECTL_VERSION: ${{ inputs.composectl-version }}
+        COMPOSECTL_SHA256: ${{ inputs.composectl-sha256 }}
+      run: |
+        tools="$RUNNER_TEMP/ota-tools"
+        mkdir -p "$tools"
+        make -C update-server fioserver fiocli-linux-amd64
+        cp update-server/bin/fioserver "$tools/fioserver"
+        cp update-server/bin/fiocli-linux-amd64 "$tools/fiocli"
+        curl -fsSL -o "$tools/composectl" \
+          "https://github.com/foundriesio/composeapp/releases/download/v${COMPOSECTL_VERSION}/composectl_${COMPOSECTL_VERSION}_linux_amd64"
+        echo "$COMPOSECTL_SHA256  $tools/composectl" | sha256sum -c -
+        chmod +x "$tools/composectl"
+        echo "OTA_TEST_TOOLS=$tools" >> "$GITHUB_ENV"
+
+    - name: Run the tests
+      shell: bash
+      env:
+        OTA_TEST_MACHINE: ${{ inputs.machine }}
+        # Emulated arm64 is slow; this bounds each wait.
+        OTA_TEST_TIMEOUT: ${{ inputs.machine == 'qemux86-64' && '1800' || '5400' }}
+        REPORT: ${{ runner.temp }}/qemu-ota-${{ inputs.machine }}.xml
+      run: |
+        python3 -m venv "$RUNNER_TEMP/venv"
+        "$RUNNER_TEMP/venv/bin/pip" install -q -r tests/qemu-ota/requirements.txt
+        cd tests/qemu-ota
+        "$RUNNER_TEMP/venv/bin/pytest" -v -p no:cacheprovider --junitxml="$REPORT"
+
+    - name: Upload the test report
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: qemu-ota-${{ inputs.machine }}
+        path: ${{ runner.temp }}/qemu-ota-${{ inputs.machine }}.xml
+        if-no-files-found: ignore

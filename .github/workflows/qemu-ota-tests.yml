@@ -1,0 +1,51 @@
+name: qemu OTA tests
+
+# Nightly run of the qemu OTA tests on both machines; pull requests run them
+# on the qemu builds of kas-build.yml.
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  KAS_CLONE_DEPTH: 1
+  # Same kas as kas-build.yml.
+  KAS_CONTAINER_IMAGE: ghcr.io/siemens/kas/kas@sha256:4b210b0be3c887875973c4f4c35470b4ecf3edd2346c9de1bdd33feae5b86e94
+  CACHE_DIR: /efs/foundries
+
+jobs:
+  qemu-ota:
+    runs-on:
+      group: GHA-prd-foundriesio-SelfHosted-RG
+      labels: [ self-hosted, qcom-u2404, amd64 ]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - qemux86-64
+          - qemuarm64-secureboot
+    name: qemu-ota ${{ matrix.target }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up kas-container and build variables
+        run: |
+          KAS_CONTAINER=$RUNNER_TEMP/kas-container
+          cid=$(docker create "$KAS_CONTAINER_IMAGE")
+          docker cp "$cid:/usr/local/bin/kas-container" "$KAS_CONTAINER"
+          docker rm "$cid"
+          chmod +x "$KAS_CONTAINER"
+          mkdir -p "$CACHE_DIR/downloads" "$CACHE_DIR/sstate-cache"
+          {
+            echo "KAS_CONTAINER=$KAS_CONTAINER"
+            echo "KAS_WORK_DIR=$RUNNER_TEMP/kas-work-${{ matrix.target }}"
+            echo "DL_DIR=$CACHE_DIR/downloads"
+            echo "SSTATE_DIR=$CACHE_DIR/sstate-cache"
+          } >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/qemu-ota-tests
+        with:
+          machine: ${{ matrix.target }}

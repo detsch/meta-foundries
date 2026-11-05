@@ -152,3 +152,25 @@ jobs:
           object_tag: ${{ env.OBJECT_TAG }}
           build_type: ${{ env.BUILD_TYPE }}
           build_branch: "branch=${{ github.base_ref || github.ref_name }}"
+
+      # The OTA tests reuse this job's warm build tree; see tests/qemu-ota.
+      - name: Check whether the OTA tests apply
+        id: ota
+        if: matrix.target != 'uno-q'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          run=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git fetch -q --no-tags --depth=1 origin "$BASE_SHA"
+            git diff --name-only "$BASE_SHA" HEAD |
+              grep -qE '^(recipes-|classes/|dynamic-layers/|conf/|ci/|tests/qemu-ota/|\.github/(actions/qemu-ota-tests/|workflows/(kas-build|qemu-ota-tests)\.yml))' ||
+              run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: qemu OTA tests ${{ matrix.target }}
+        if: steps.ota.outputs.run == 'true'
+        uses: ./.github/actions/qemu-ota-tests
+        with:
+          machine: ${{ matrix.target }}
