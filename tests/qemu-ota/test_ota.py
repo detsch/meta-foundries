@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import APP, HARDWARE_ID, TAG, wait_for
+from conftest import APP, HARDWARE_ID, SECOND_APP, TAG, wait_for
 
 
 def _stage(tmp: Path, version: int, ostree_repo: Path, apps: Path) -> Path:
@@ -53,8 +53,24 @@ def _installed(device, version: int):
     return done
 
 
+def _running(device, app: str) -> bool:
+    return app in device.run("docker ps --format '{{.Names}}'").stdout
+
+
 def _app_running(device) -> bool:
-    return APP in device.run("docker ps --format '{{.Names}}'").stdout
+    return _running(device, APP)
+
+
+def _booted_commit(device) -> str:
+    return re.search(r"^\* nodistro (\w+)\.",
+                     device.run("ostree admin status").stdout, re.M).group(1)
+
+
+def _second_app_version(device) -> str:
+    env = device.run(
+        "docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "
+        f"$(docker ps -q --filter name={SECOND_APP})").stdout
+    return re.search(r"^APP_VERSION=(\S+)$", env, re.M).group(1)
 
 
 def _assert_server_success(fiocli, uuid: str):
@@ -189,4 +205,73 @@ def test_rollback_on_boot_failure(fiocli, registered_device, device, releases,
     # A failed Target is skipped from then on: let the client poll a few
     # times, then check it was downloaded once.
     time.sleep(60)
+    _assert_single_download(fiocli, registered_device)
+
+
+def test_add_app_without_os_update(fiocli, registered_device, device,
+                                   releases, second_app_content, tmp_session):
+    """A second App on the running OS: installed without a reboot."""
+    content = _stage(tmp_session, 5, releases / "2" / "ostree_repo",
+                     second_app_content(1))
+    boot_id, commit = device.boot_id(), _booted_commit(device)
+    _deliver(fiocli, registered_device, content, 5)
+
+    wait_for("version 5", _installed(device, 5))
+    assert device.boot_id() == boot_id, "App update rebooted the device"
+    assert _booted_commit(device) == commit
+    wait_for(f"{SECOND_APP} running", lambda: _running(device, SECOND_APP),
+             timeout=300)
+    assert _second_app_version(device) == "1"
+    assert _app_running(device)
+    _assert_server_success(fiocli, registered_device)
+    _assert_single_download(fiocli, registered_device)
+
+
+def test_update_app_without_os_update(fiocli, registered_device, device,
+                                      releases, second_app_content,
+                                      tmp_session):
+    """A new version of the second App: replaced without a reboot, and the
+    other App keeps running."""
+    content = _stage(tmp_session, 6, releases / "2" / "ostree_repo",
+                     second_app_content(2))
+    boot_id, commit = device.boot_id(), _booted_commit(device)
+    _deliver(fiocli, registered_device, content, 6)
+
+    wait_for("version 6", _installed(device, 6))
+    assert device.boot_id() == boot_id, "App update rebooted the device"
+    assert _booted_commit(device) == commit
+    wait_for(f"{SECOND_APP} version 2",
+             lambda: _running(device, SECOND_APP)
+             and _second_app_version(device) == "2", timeout=300)
+    assert _app_running(device)
+    _assert_server_success(fiocli, registered_device)
+    _assert_single_download(fiocli, registered_device)
+
+
+def test_select_apps_by_config(fiocli, registered_device, device):
+    """A device config naming one App: the device stops running the other."""
+    fiocli("configs", "updates", "--device", registered_device, "--apps", APP)
+    # fioconfig fetches its config when it starts.
+    device.run("systemctl restart fioconfig")
+
+    wait_for(f"{SECOND_APP} to stop",
+             lambda: not _running(device, SECOND_APP), timeout=600)
+    assert _app_running(device)
+    assert fiocli("configs", "applied", registered_device).strip()
+
+
+def test_reboot_keeps_state(fiocli, registered_device, device):
+    """A reboot with no update pending: same version and Apps, and nothing
+    downloaded again."""
+    boot_id = device.boot_id()
+    device.run("systemctl reboot", check=False, timeout=30)
+
+    wait_for("reboot", lambda: device.reachable()
+             and device.boot_id() != boot_id, timeout=600)
+    assert _applied_version(device) == 6
+    wait_for(f"{APP} running", lambda: _app_running(device), timeout=300)
+    # Let the client poll a few times after the boot.
+    time.sleep(60)
+    assert not _running(device, SECOND_APP)
+    assert _applied_version(device) == 6
     _assert_single_download(fiocli, registered_device)

@@ -238,6 +238,17 @@ services:
 BUSYBOX = ("docker.io/library/busybox@sha256:"
            "a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec")
 
+SECOND_APP = "second-app"
+SECOND_APP_COMPOSE = """\
+services:
+  second:
+    image: {image}
+    command: ["sleep", "infinity"]
+    environment:
+      APP_VERSION: "{version}"
+"""
+
+
 def _docker(*args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run([_tool("docker"), *args], check=True,
                           capture_output=True, text=True, **kwargs)
@@ -340,6 +351,21 @@ def broken_app_content(app_registry) -> Path:
         app_registry.pull(app_registry.publish(
             "broken-app", BROKEN_APP_COMPOSE.format(image=BUSYBOX)), apps)
     return _cached_apps(CACHE / f"broken-app-{APP_ARCH}", build)
+
+
+@pytest.fixture(scope="session")
+def second_app_content(app_registry):
+    """Returns the upload layout of shellhttpd plus a second App whose
+    container reports the given version in APP_VERSION."""
+    def content(version: int) -> Path:
+        def build(apps):
+            app_registry.pull(APP_URI, apps)
+            app_registry.pull(app_registry.publish(
+                SECOND_APP, SECOND_APP_COMPOSE.format(image=BUSYBOX,
+                                                      version=version)), apps)
+        return _cached_apps(
+            CACHE / f"apps-{SECOND_APP}-v{version}-{APP_ARCH}", build)
+    return content
 
 
 @pytest.fixture(scope="session")
